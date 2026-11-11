@@ -1,4 +1,4 @@
-import simpy, random
+import simpy, random, metrics
 from msg import Msg, MsgKind
 
 
@@ -25,6 +25,11 @@ class Peer:
         self.neighbor_pieces = {}
         self.env = env
 
+        
+        self.metrics = properties["metrics"]
+        self.optimistic = None                       # peer currently in the optimistic slot
+        self.recv_window = {}                        # pieces received per neighbour this round (Tit-For-Tat input)
+        self.metrics.on_join(self)                   # tells Metrics the peer has joined the swarm
 
 
     def dispatcher(self):
@@ -50,14 +55,21 @@ class Peer:
     def serve(self, src, piece, done):
         #TODO: called by dispatcher upon request, represents the upload 
         a = 0;
+        self.metrics.on_transfer(self, requester, piece, optimistic=(requester is self.optimistic))  # uploader sent a piece
+        done.succeed(self)
 
     def download(self):
         #TODO: download loop, spinned at the start and woken up by dispatcher
         a = 0;
+        self.metrics.on_piece(self, piece)  # peer has a new seed
 
     def wake(self):
         #TODO: wakes up the downloader, informing that a UNCHOKE message arrived
         a = 0;
 
+    def leave(self):
+        #TODO: peer leaves the swarm
+        a = 0;
+        self.metrics.on_leave(self, peer)
     
 
