@@ -1,0 +1,27 @@
+{
+  "cfg": {
+    "n_pieces": 200,
+    "piece_size": 262144,
+    "block_size": 16384,
+    "rechoke_interval": 10,
+    "optimistic_every": 3,
+    "n_regular_unchoke": 4,
+    "share_idle_bandwidth": true
+  },
+  "sim": {
+    "n_expected": 200,
+    "n_seeds": 1,
+    "upload_bw": 1000000,
+    "until": 3600,
+    "sample_dt": 1.0,
+    "n_neighbors": 50,
+    "max_initiate": 40
+  },
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ]
+}
