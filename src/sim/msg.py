@@ -5,6 +5,12 @@ class MsgKind(Enum):
     UNCHOKE = "UNCHK"
     CHOKE = "CHK"
     HAVE = "HAVE"
+    INTERESTED = "INT"
+    NOT_INTERESTED = "NOT_INT"
+
+
+# value carried by a REQUEST's `done` event
+OK, CHOKED, LEFT = "ok", "choked", "left"
 
 
 class Msg:
@@ -14,4 +20,3 @@ class Msg:
         self.src = src
         self.piece = piece
         self.done = done
-
