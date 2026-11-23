@@ -6,6 +6,10 @@ import simpy
 from msg import Msg, MsgKind, OK, CHOKED, LEFT
 
 
+CHOKE_POLICIES = ("tft", "random")
+PIECE_POLICIES = ("rarest", "sequential", "random")
+
+
 @dataclass(frozen=True)
 class Config:
     n_pieces: int
@@ -15,6 +19,14 @@ class Config:
     optimistic_every: int = 3           # rechoke rounds
     n_regular_unchoke: int = 4
     share_idle_bandwidth: bool = False  # see Peer.current_rate()
+    choke_policy: str = "tft"           # regular slots: "tft" = best rate, "random" = uniform baseline
+    piece_policy: str = "rarest"        # next piece: "rarest", "sequential" or "random", see Peer.pick()
+
+    def __post_init__(self):
+        if self.choke_policy not in CHOKE_POLICIES:
+            raise ValueError(f"choke_policy must be one of {CHOKE_POLICIES}, got {self.choke_policy!r}")
+        if self.piece_policy not in PIECE_POLICIES:
+            raise ValueError(f"piece_policy must be one of {PIECE_POLICIES}, got {self.piece_policy!r}")
 
 
 @dataclass
@@ -191,11 +203,25 @@ class Peer:
             self._procs.append(self.env.process(self._seed_then_leave()))
 
     def pick(self, candidates):
-        """Rarest piece still needed that some candidate holds, as (piece, peer), or None."""
+        """
+            Next piece still needed that some candidate holds, as (piece, peer), or None.
+            rarest: fewest copies among neighbors. sequential: lowest index.
+            random: uniform over pieces. Ties between holders are broken at random.
+        """
+        policy = self.cfg.piece_policy
+        draw = {}                       # one draw per piece, so widely held pieces aren't favored
         best = None
         for peer in _sorted(candidates):
             for piece in sorted(self.neighbor_has[peer] - self.have - self.requested):
-                key = (self.availability[piece], self.rng.random())
+                if policy == "rarest":
+                    rank = self.availability[piece]
+                elif policy == "sequential":
+                    rank = piece
+                else:
+                    if piece not in draw:
+                        draw[piece] = self.rng.random()
+                    rank = draw[piece]
+                key = (rank, self.rng.random())
                 if best is None or key < best[0]:
                     best = (key, piece, peer)
         return None if best is None else (best[1], best[2])
@@ -248,9 +274,12 @@ class Peer:
 
     def _rechoke(self, rnd):
         cands = _sorted(self.interested_peers & self.neighbors)
-        score = self.bytes_to if self.is_complete() else self.bytes_from
-        ranked = sorted(cands, key=lambda p: (-score[p], self.rng.random()))
-        regular = ranked[: self.cfg.n_regular_unchoke]
+        if self.cfg.choke_policy == "random":
+            regular = self.rng.sample(cands, min(self.cfg.n_regular_unchoke, len(cands)))
+        else:
+            score = self.bytes_to if self.is_complete() else self.bytes_from
+            ranked = sorted(cands, key=lambda p: (-score[p], self.rng.random()))
+            regular = ranked[: self.cfg.n_regular_unchoke]
         rest = [p for p in cands if p not in regular]
         if rnd % self.cfg.optimistic_every == 0 or self.optimistic not in rest:
             self.optimistic = self.rng.choice(rest) if rest else None

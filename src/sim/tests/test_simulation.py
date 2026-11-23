@@ -1,3 +1,4 @@
+import argparse
 import csv
 import dataclasses
 import json
@@ -126,6 +127,82 @@ def test_determinism():
     run = lambda seed: repr(simulation.run_one(CFG, small(), seed))     # repr: entropy can be nan, and nan != nan
     assert run(5) == run(5)
     assert run(5) != run(6)
+
+
+def test_random_policy_full_run(monkeypatch):
+    monkeypatch.setattr(Peer, "debug", True)
+    cfg = dataclasses.replace(CFG, choke_policy="random")
+    rows, series = simulation.run_one(cfg, small(), 0)
+    assert all(r["ct"] is not None for r in rows if r["kind"] == "leecher")
+    assert {r["policy"] for r in rows} == {s["policy"] for s in series} == {"random"}
+
+
+@pytest.mark.parametrize("policy", ["rarest", "sequential", "random"])
+def test_piece_policy_full_run(monkeypatch, policy):
+    monkeypatch.setattr(Peer, "debug", True)
+    cfg = dataclasses.replace(CFG, piece_policy=policy)
+    rows, series = simulation.run_one(cfg, small(), 0)
+    assert all(r["ct"] is not None and r["down"] == cfg.n_pieces for r in rows if r["kind"] == "leecher")
+    assert {r["piece_policy"] for r in rows} == {s["piece_policy"] for s in series} == {policy}
+
+
+@pytest.mark.parametrize("change", [{"choke_policy": "random"}, {"piece_policy": "sequential"},
+                                    {"piece_policy": "random"}])
+def test_policies_share_the_same_overlay(change):
+    '''Same seed, same overlay: runs of different policies can be compared pairwise.'''
+    edges = lambda c: {p.pid: {q.pid for q in p.neighbors} for p in simulation.build(c, SIM, 0)[2]}
+    assert edges(CFG) == edges(dataclasses.replace(CFG, **change))
+
+
+def test_cli_policy_flag(tmp_path):
+    script = Path(simulation.__file__)
+    code = ("import sys, dataclasses, simulation as s;"
+            "s.cfg = dataclasses.replace(s.cfg, n_pieces=10); s.sim['n_expected'] = 20;"
+            f"sys.argv = ['simulation.py', '--seeds', '1', '--jobs', '1', '--policy', 'random', '--piece-policy', 'sequential', '--out', {str(tmp_path)!r}];"
+            "s.main()")
+    subprocess.run([sys.executable, "-c", code], cwd=script.parent, check=True, capture_output=True)
+    conf = json.loads((tmp_path / "config.json").read_text())["cfg"]
+    assert conf["choke_policy"] == "random" and conf["piece_policy"] == "sequential"
+    peers = list(csv.DictReader(open(tmp_path / "peers.csv")))
+    assert {r["policy"] for r in peers} == {"random"} and {r["piece_policy"] for r in peers} == {"sequential"}
+
+
+def test_cli_capacity_sweep(tmp_path):
+    script = Path(simulation.__file__)
+    code = ("import sys, dataclasses, simulation as s;"
+            "s.cfg = dataclasses.replace(s.cfg, n_pieces=10); s.sim['n_expected'] = 20;"
+            "sys.argv = ['simulation.py', '--seeds', '2', '--jobs', '1', '--capacities', '1e6', '500000', '1e6',"
+            f" '--out', {str(tmp_path)!r}];"
+            "s.main()")
+    subprocess.run([sys.executable, "-c", code], cwd=script.parent, check=True, capture_output=True)
+
+    peers = list(csv.DictReader(open(tmp_path / "peers.csv")))
+    series = list(csv.DictReader(open(tmp_path / "series.csv")))
+    summary = list(csv.DictReader(open(tmp_path / "summary.csv")))
+    conf = json.loads((tmp_path / "config.json").read_text())
+    assert len(peers) == 2 * 2 * 21                             # the repeated 1e6 runs once
+    assert {r["upload_bw"] for r in peers} == {r["upload_bw"] for r in series} == {"500000", "1000000"}
+    assert all(r["up_cap"] == r["upload_bw"] for r in peers)    # the capacity reached the peers
+    assert conf["sim"]["upload_bw"] == [500000, 1000000]
+    assert [int(r["upload_bw"]) for r in summary] == [500000, 1000000]
+    assert all(r["n_runs"] == "2" and r["n_done"] == r["n_leechers"] == "40" for r in summary)
+    assert float(summary[0]["ct_mean"]) > float(summary[1]["ct_mean"])
+
+
+def test_summarize_reports_unfinished_leechers():
+    row = lambda seed, ct: {"upload_bw": 10, "seed": seed, "kind": "leecher", "ct": ct}
+    [s] = simulation.summarize([row(0, 2.0), row(0, 4.0), row(1, 6.0), row(1, None),
+                                {"upload_bw": 10, "seed": 0, "kind": "seed", "ct": 0.0}])
+    assert (s["n_runs"], s["n_leechers"], s["n_done"]) == (2, 4, 3)
+    assert s["ct_mean"] == pytest.approx(4.0) and s["ct_max"] == 6.0
+    [empty] = simulation.summarize([row(0, None)])
+    assert empty["n_done"] == 0 and empty["ct_mean"] is None and empty["ct_max"] is None
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "abc", "inf", "nan"])
+def test_capacity_rejects_invalid_values(bad):
+    with pytest.raises(argparse.ArgumentTypeError):
+        simulation._capacity(bad)
 
 
 def test_cli_writes_outputs(tmp_path):

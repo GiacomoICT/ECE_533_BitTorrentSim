@@ -1,5 +1,6 @@
 import random
 import sys
+from collections import Counter
 from itertools import combinations
 from pathlib import Path
 
@@ -196,6 +197,83 @@ def test_seed_then_leave(monkeypatch):
         assert l.stats.departure_time == pytest.approx(l.stats.completion_time + 5)
         assert not l.alive and not l.neighbors
     assert not seed.neighbors
+
+
+def regular_picks(policy, rounds=200):
+    '''Rechoke repeatedly with 4 fast and 4 idle interested peers; count who gets a regular slot.'''
+    cfg = Config(n_pieces=CFG.n_pieces, piece_size=CFG.piece_size, choke_policy=policy)
+    env = simpy.Environment()
+    u, *others = [make(env, i, cfg) for i in range(9)]
+    connect(u, *others)
+    u.interested_peers = set(others)
+    fast = others[:4]
+    picks = Counter()
+    for rnd in range(rounds):
+        for p in fast:
+            u.bytes_from[p] = 1000
+        u._rechoke(rnd)
+        assert len(u.unchoked) == cfg.n_regular_unchoke + 1
+        picks.update(p.pid for p in u.unchoked if p is not u.optimistic)
+    return {p.pid for p in fast}, picks
+
+
+def test_tft_policy_keeps_fastest_peers():
+    fast, picks = regular_picks("tft")
+    assert set(picks) == fast and all(n == 200 for n in picks.values())
+
+
+def test_random_policy_ignores_rates():
+    fast, picks = regular_picks("random")
+    assert set(picks) == set(range(1, 9))
+    idle_share = sum(n for pid, n in picks.items() if pid not in fast) / sum(picks.values())
+    assert idle_share == pytest.approx(0.5, abs=0.1)
+
+
+def test_unknown_policy_rejected():
+    with pytest.raises(ValueError):
+        Config(n_pieces=1, piece_size=1, choke_policy="nope")
+
+
+def picker(policy, holdings):
+    '''A leecher whose neighbors hold the given piece sets; returns it and the neighbors.'''
+    cfg = Config(n_pieces=CFG.n_pieces, piece_size=CFG.piece_size, piece_policy=policy)
+    env = simpy.Environment()
+    l = make(env, 0, cfg)
+    others = [Peer(env, i, cfg, random.Random(i), BW, pieces) for i, pieces in enumerate(holdings, 1)]
+    for p in others:
+        l.add_neighbor(p)
+    return l, others
+
+
+def test_rarest_picks_fewest_copies():
+    l, others = picker("rarest", [{0, 1}, {0}])
+    assert l.pick(set(others)) == (1, others[0])
+
+
+def test_sequential_picks_lowest_needed_index():
+    l, others = picker("sequential", [{0, 1, 2, 3}, {0, 3}])
+    assert l.pick(set(others))[0] == 0
+    l.have.add(0)
+    l.requested.add(1)
+    assert l.pick(set(others)) == (2, others[0])
+
+
+def test_random_is_uniform_over_pieces():
+    l, others = picker("random", [{0}] * 5 + [{1}])      # piece 0 has 5 holders, piece 1 has one
+    picks = Counter(l.pick(set(others))[0] for _ in range(2000))
+    assert picks[1] / 2000 == pytest.approx(0.5, abs=0.05)
+
+
+@pytest.mark.parametrize("policy", ["rarest", "sequential", "random"])
+def test_pick_returns_none_without_useful_pieces(policy):
+    l, others = picker(policy, [{0}])
+    l.have.add(0)
+    assert l.pick(set(others)) is None
+
+
+def test_unknown_piece_policy_rejected():
+    with pytest.raises(ValueError):
+        Config(n_pieces=1, piece_size=1, piece_policy="nope")
 
 
 def test_metrics_hooks():
